@@ -1,0 +1,11 @@
+streamlit==1.49.1
+litellm==1.76.1
+chromadb==1.0.20
+sentence-transformers==5.1.0
+pdfplumber==0.11.7
+# Especificar PyTorch con CUDA 12.6 para reproducibilidad
+torch==2.7.1+cu126
+
+# Nota: pip necesitará encontrar una rueda compatible. Si pip falla, instale PyTorch usando
+# las instrucciones oficiales: https://pytorch.org/get-started/locally/ (seleccione CUDA 12.6)
+--extra-index-url https://download.pytorch.org/whl/cu126
