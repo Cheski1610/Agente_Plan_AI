@@ -1,1 +1,1 @@
-## Proyecto Agente Plan — AI
+## Proyecto Agente Plan - AI
