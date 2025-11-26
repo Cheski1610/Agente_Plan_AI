@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## Propósito del Agente
-El propósito de este agente es **asistir en el desarrollo del Plan de Trabajo de una auditoría individual**, utilizando:
+El propósito de este agente es **asistir en el desarrollo del Programa de Trabajo de una auditoría individual**, utilizando:
 
 - información recuperada vía RAG,
 - información actual obtenida mediante búsquedas web autorizadas.
