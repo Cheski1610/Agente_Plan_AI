@@ -373,7 +373,7 @@ def main():
         </style>
         ''', unsafe_allow_html=True
     )
-    st.title("Agente Plan — AI")
+    st.title("Agente Programa — AI")
 
     # controles en la sidebar
     st.sidebar.header("Configuración")
