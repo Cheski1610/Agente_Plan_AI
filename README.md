@@ -1,5 +1,9 @@
 ## Proyecto Agente Programa - AI
 
+<div align="center">
+    <img src="Images/Imagen_1.png" alt="Portada" style="max-width:800px; height:auto;" />
+</div>
+
 Aplicación Streamlit especializada en **redactar programas de trabajo para auditorías individuales**. Carga documentación interna (políticas, lineamientos, manuales) en forma de PDF, genera un índice vectorial en ChromaDB y consulta dicha base junto con instrucciones del archivo `agents_es.md`, que describe el flujo completo para diseñar programas de auditoría: objetivos, alcance, criterios, matriz de riesgos, pruebas y cronograma. Cuando el modelo necesita información externa (regulación reciente, riesgos emergentes), complementa el análisis con una búsqueda web mediante Tavily. Cada instrucción limita el uso de la herramienta a una sola llamada para mantener controlado el flujo y los costos.
 
 ### Características principales
