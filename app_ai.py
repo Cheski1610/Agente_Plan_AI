@@ -1,4 +1,5 @@
 import os
+import json
 import streamlit as st
 from litellm import completion
 import chromadb
@@ -7,7 +8,11 @@ import torch
 import pdfplumber
 import uuid
 import tempfile
-from typing import Generator, List, Optional, Tuple
+from tavily import TavilyClient
+from typing import List, Optional, Tuple
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 def _env_base(name: str, default: str) -> str:
@@ -30,6 +35,8 @@ DEFAULT_GITHUB_BASE = _env_base("GITHUB_MODELS_API_BASE", "https://api.githubcop
 DEFAULT_CEREBRAS_MODEL = os.environ.get("CEREBRAS_MODEL_ID", "cerebras/qwen-3-32b")
 DEFAULT_CEREBRAS_BASE = _env_base("CEREBRAS_API_BASE", "https://api.cerebras.ai/v1")
 PROVIDER_OPTIONS = ("Ollama (local)", "GitHub Models", "Cerebras")
+MAX_TOOL_CALLS_PER_RUN = 1
+
 
 
 def get_secret_or_env(name: str) -> Optional[str]:
@@ -39,16 +46,42 @@ def get_secret_or_env(name: str) -> Optional[str]:
     except (AttributeError, KeyError):
         return st.secrets[name]
 
+# Cliente Tavily
+tavily_client = TavilyClient(api_key=get_secret_or_env("TAVILY_API_KEY")) if get_secret_or_env("TAVILY_API_KEY") else None
 
-def build_completion_kwargs(prompt: str, llm_config: dict) -> dict:
+def tavily_search(**kwargs):
+    if not tavily_client:
+        raise RuntimeError("Tavily API key is not configured.")
+    results = tavily_client.search(**kwargs)
+    return results
+
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "tavily_search",
+            "description": "Search the web with Tavily for up-to-date information",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The search query"},
+                    "max_results": {"type": "integer", "default": 5},
+                },
+                "required": ["query"],
+            },
+        },
+    }
+]
+
+def build_completion_kwargs(messages: List[dict], llm_config: dict, include_tools: bool = True) -> dict:
     """Prepara los argumentos para litellm según el proveedor seleccionado."""
     params = {
         "model": llm_config["model"],
-        "messages": [{"role": "system", "content": agents_md},
-            {"role": "user", "content": prompt}],
+        "messages": messages,
         "temperature": llm_config["temperature"],
-        "stream": True,
     }
+    if include_tools and tavily_client:
+        params["tools"] = tools
     if llm_config.get("api_base"):
         params["api_base"] = llm_config["api_base"]
     if llm_config.get("api_key"):
@@ -181,22 +214,109 @@ def retrieve_context(collection, embedder, query: str, n_results: int = 3) -> st
     return ""
 
 
-def rag_query_stream(question: str, collection, embedder, llm_config: dict, n_results: int) -> Generator[str, None, None]:
-    """Genera la respuesta del modelo en streaming usando la configuración indicada."""
+def execute_tool_call(tool_call: dict) -> Tuple[str, List[dict]]:
+    """Ejecuta la función solicitada por el modelo y devuelve contenido serializado y resultados crudos."""
+    if tool_call.get("type") != "function":
+        return json.dumps({"error": "Tipo de herramienta no soportado."}, ensure_ascii=False), []
+
+    name = tool_call.get("function", {}).get("name")
+    raw_args = tool_call.get("function", {}).get("arguments", "{}")
+    try:
+        args = json.loads(raw_args) if raw_args else {}
+    except json.JSONDecodeError as exc:
+        return json.dumps({"error": f"Argumentos inválidos: {exc}"}, ensure_ascii=False), []
+
+    if name == "tavily_search":
+        result = tavily_search(**args)
+        raw_results = result.get("results", []) if isinstance(result, dict) else []
+        query = args.get("query", "")
+        if raw_results:
+            summary_lines = [
+                f"Título: {item.get('title', 'Sin título')} | URL: {item.get('url', '')} | Resumen: {item.get('content') or item.get('snippet', '')}"
+                for item in raw_results
+            ]
+            summary_text = "\n".join(summary_lines)
+        else:
+            detail = result.get("answer") if isinstance(result, dict) else ""
+            detail = detail or result.get("error") if isinstance(result, dict) else detail
+            detail = detail or "Sin resultados devueltos por Tavily."
+            summary_text = f"Búsqueda sin resultados para '{query}'. Detalle: {detail}"
+        return summary_text, raw_results
+
+    return json.dumps({"error": f"Herramienta '{name}' no implementada."}, ensure_ascii=False), []
+
+
+def rag_query(question: str, collection, embedder, llm_config: dict, n_results: int) -> Tuple[str, List[dict]]:
+    """Ejecuta la consulta RAG y coordina tool-calling hasta obtener una respuesta final."""
     context = retrieve_context(collection, embedder, question, n_results=n_results)
     prompt = f"""
-    Usa el siguiente contexto para responder la pregunta:
+    Usa el siguiente contexto para responder la pregunta. Si necesitas información adicional o más actualizada, solicita una búsqueda web usando tavily_search.
 
     Contexto: {context}
 
     Pregunta: {question}
     """
-    params = build_completion_kwargs(prompt, llm_config)
-    response = completion(**params)
-    for chunk in response:
-        delta = chunk["choices"][0]["delta"].get("content", "")
-        if delta:
-            yield delta
+
+    messages: List[dict] = [
+        {"role": "system", "content": agents_md},
+        {"role": "user", "content": prompt},
+    ]
+    collected_web_results: List[dict] = []
+    tool_calls_used = 0
+
+    # Permitimos varios ciclos en caso de que el modelo necesite múltiples búsquedas.
+    for _ in range(6):
+        allow_tools = tavily_client is not None and tool_calls_used < MAX_TOOL_CALLS_PER_RUN
+        params = build_completion_kwargs(messages, llm_config, include_tools=allow_tools)
+        response = completion(**params)
+        choice = response["choices"][0]
+        message = choice.get("message", {})
+        messages.append(message)
+
+        tool_calls = message.get("tool_calls") or []
+        if tool_calls:
+            if not allow_tools:
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": "Ya ejecutaste la herramienta disponible. Usa la información entregada para responder sin llamar nuevas funciones.",
+                    }
+                )
+                continue
+
+            for tool_call in tool_calls:
+                if tool_calls_used >= MAX_TOOL_CALLS_PER_RUN:
+                    break
+                tool_content, raw_results = execute_tool_call(tool_call)
+                if raw_results:
+                    collected_web_results.extend(raw_results)
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.get("id"),
+                        "content": tool_content,
+                    }
+                )
+                tool_calls_used += 1
+
+            if tool_calls_used >= MAX_TOOL_CALLS_PER_RUN:
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": "La búsqueda web ya se ejecutó una vez. Integra esos hallazgos con el contexto local y entrega tu respuesta final.",
+                    }
+                )
+            continue
+
+        content = (message.get("content") or "").strip()
+        if content:
+            return content, collected_web_results
+
+        if choice.get("finish_reason") not in ("tool_calls", None):
+            # Si llegamos aquí sin contenido, devolvemos un mensaje de error genérico.
+            break
+
+    raise RuntimeError("No fue posible obtener una respuesta final del modelo tras usar las herramientas.")
 
 # Main Streamlit app
 def main():
@@ -410,13 +530,24 @@ def main():
             st.warning("Configura un token válido para el proveedor seleccionado antes de preguntar.")
         else:
             placeholder = st.empty()
-            output = ""
             try:
                 with st.spinner("Solicitando respuesta al modelo..."):
-                    for delta in rag_query_stream(question, st.session_state.collection, st.session_state.embedder, llm_config, n_results):
-                        output += delta
-                        placeholder.markdown(output)
+                    answer, web_results = rag_query(
+                        question,
+                        st.session_state.collection,
+                        st.session_state.embedder,
+                        llm_config,
+                        n_results,
+                    )
+                placeholder.markdown(answer or "_Sin texto devuelto por el modelo._")
                 st.success("Respuesta completa")
+                if web_results:
+                    with st.expander("Resultados web consultados"):
+                        for item in web_results:
+                            title = item.get("title") or "Resultado sin título"
+                            url = item.get("url") or ""
+                            snippet = item.get("content") or item.get("snippet") or ""
+                            st.markdown(f"- [{title}]({url})\n\n{snippet}")
             except Exception as exc:
                 st.error(f"Error al solicitar respuesta: {exc}")
 
