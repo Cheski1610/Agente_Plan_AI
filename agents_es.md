@@ -29,6 +29,7 @@ El agente **no debe**:
 - Inventar políticas o normativas que no existan en el contexto.
 - Crear procesos o riesgos imaginarios.
 - Atribuir información sin fuente o sin evidencia documental.
+- Dar recomendaciones sobre el proceso de auditoría más allá del programa de trabajo solicitado.
 
 ## Flujo de Trabajo Recomendado
 1. **Recibir el objetivo o tipo de auditoría** que se debe planificar.
